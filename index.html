@@ -1,0 +1,329 @@
+<!doctype html>
+<!--
+=====================================================================
+  CASSE-BRIQUES : fichier unique HTML + CSS + JS (smartphone, tablette, PC)
+=====================================================================
+  BRIQUES (k)
+    n  normale      1 coup
+    s  surprise ?   1 coup, lâche un bonus qui tombe
+    r  résistante   2 à 10 coups (le chiffre affiché = coups restants)
+    b  bombe        un coup = TOUT le mur est pulvérisé
+
+  BONUS (lettre sur la capsule qui tombe : à attraper avec la raquette)
+    M multi-balles   chaque balle se divise en 3 (9 balles maximum)
+    L raquette XL    raquette plus large pendant 20 s
+    $ points         +500
+    V vie            +1 vie (6 maximum)
+    G mitraillette   la raquette tire des balles pendant 8 s
+    Z laser x2       2 tirs : le rayon monte, pulvérise TOUTE la rangée de la
+                     1re brique rencontrée (toucher l’écran ou Espace pour tirer)
+
+  NIVEAUX : le niveau se termine quand le mur est entièrement détruit.
+    Niveau suivant : plus de briques résistantes (pourcentage +8 % par niveau,
+    80 % maximum), plus de coups possibles par brique (jusqu’à 10), balle plus
+    rapide, plus de rangées (jusqu’à 9).
+
+  COMMANDES
+    Smartphone/tablette : glisser le doigt = bouger ; toucher = lancer / tirer le laser
+    Souris : bouger la souris ; clic = lancer / laser    Clavier : ← → (ou Q/D), Espace, P = pause
+
+  ADAPTATION SMARTPHONE / TABLETTE (un seul code pour doigt, stylet et souris : « Pointer Events »)
+    Affichage   : canvas 3:4 qui remplit l’écran, suit la rotation, respecte les encoches ;
+                  sa résolution s’adapte à l’écran (fonction fit) : net sur les écrans haute densité.
+                  En paysage sur téléphone, un bandeau invite à tourner l’appareil en portrait.
+    Déplacement : 2 modes au choix (bouton « Mode » du menu, mémorisé)
+                    Relatif (défaut) : la raquette bouge comme le doigt, sans se placer dessous
+                    Direct           : la raquette se place sous le doigt
+    Multi-touch : un doigt déplace, un 2e doigt qui touche = lancer la balle / tirer le laser
+    Confort     : vibrations (bonus, vie perdue, bombe), écran maintenu allumé pendant la partie,
+                  pause automatique si l’appli passe en arrière-plan, bouton Retour d’Android = pause
+
+  RÉGLAGES RAPIDES (cherchez ces repères)
+    pr=...  pourcentage de briques résistantes (build)   ri(2,Math.min(10,...)) coups max
+    spd()   vitesse de la balle                          BAG   probabilités des bonus
+    DRAG_SENS  sensibilité du glissement                 wideT=20, mgT=8  durées des bonus
+=====================================================================
+-->
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b1020">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Casse-briques</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧱</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+/* Plein écran ; le canvas garde son ratio 3:4 et s’adapte à la rotation */
+html,body{height:100%;margin:0;background:#0b1020;overscroll-behavior:none}
+body{display:flex;align-items:center;justify-content:center;overflow:hidden;box-sizing:border-box;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
+#c{width:min(100%,calc((100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px)) * .75));height:auto;aspect-ratio:3/4;display:block;touch-action:none}
+/* Bandeau affiché seulement sur un téléphone tenu en paysage (écran trop bas pour ce jeu vertical) */
+#rot{display:none;position:fixed;left:0;right:0;top:0;padding:6px;text-align:center;font:11px ui-monospace,monospace;background:#ffb02e;color:#1a1200;pointer-events:none;z-index:2}
+@media (orientation:landscape) and (max-height:520px){#rot{display:block}}
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Casse-briques : glissez pour déplacer la raquette"></canvas>
+<div id="rot">Tournez l’appareil en mode portrait pour mieux jouer</div>
+<script>
+(()=>{
+/* ================= 1. CONSTANTES ET ÉTAT ================= */
+const W=480,H=640,DRAG_SENS=1.3;                       // repère logique du canvas ; sensibilité du glissement
+const cv=document.getElementById('c'),g=cv.getContext('2d');
+/* Résolution du canvas : adaptée à sa taille réelle à l’écran (jusqu’à ×2) pour rester net sur les
+   écrans haute densité. Tout le dessin reste codé en 480×640 grâce à setTransform. Rappelée à chaque rotation. */
+function fit(){
+  const r=cv.getBoundingClientRect(),d=typeof devicePixelRatio==='number'?devicePixelRatio:1,s=clamp((r.width||W)*d/W,1,2);
+  cv.width=Math.round(W*s);cv.height=Math.round(H*s);g.setTransform(s,0,0,s,0,0);
+}
+const rnd=(a,b)=>a+Math.random()*(b-a), ri=(a,b)=>Math.floor(rnd(a,b+1)), clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const COLS=10,BW=42,BH=18,GAP=4,OX=12,OY=76,R=7,TOP=40;   // grille de briques, rayon de balle, plafond du terrain
+const PAL=['#ff6b57','#ff9a3d','#ffd23f','#6be28b','#3ddbd9','#6aa5ff','#b388ff','#ff7ac8','#9fb0ff'];   // couleur par rangée
+const GD={M:['#3ddbd9','Multi-balles'],L:['#ffb02e','Raquette XL'],'$':['#8bf06b','+500 points'],V:['#ff6b9a','Vie en plus'],G:['#ff6b57','Mitraillette'],Z:['#b388ff','Laser x2']};
+const BAG='MMMMLLLL$$$$GGGZZZV';                       // tirage pondéré des bonus (plus une lettre est répétée, plus elle est fréquente)
+
+let st='title';          // title | ready (balle sur la raquette) | play | levelup | over
+let paused=false,score=0,best=0,lives=3,level=1,time=0,pr=0;
+let bricks=[],balls=[],gifts=[],bul=[],pt=[],beams=[],btns=[],K={};
+let wideT=0,mgT=0,mgCd=0,lz=0,fl=0,toast='',toastT=0,msgT=0,overAt=0;
+const P={x:W/2,y:H-48,w:70,h:12};                      // raquette
+let mode='rel';          // contrôle tactile : 'rel' = relatif (défaut), 'abs' = direct sous le doigt (mémorisé)
+let wl=null;             // verrou « écran allumé » (Wake Lock) pendant la partie
+const vib=n=>{try{if(navigator.vibrate)navigator.vibrate(n)}catch(e){}};   // vibration (ignorée si non supportée)
+try{best=+localStorage.getItem('casse-briques-best')||0;mode=localStorage.getItem('casse-briques-mode')==='abs'?'abs':'rel'}catch(e){}
+const spd=()=>Math.min(560,340+level*18);              // vitesse de la balle selon le niveau
+
+/* ================= 2. CRÉATION D’UN NIVEAU ================= */
+function build(){
+  const rows=Math.min(9,5+Math.ceil(level/2));         // 6 rangées au niveau 1, jusqu’à 9
+  pr=Math.min(.8,.06+level*.08);                       // % de briques résistantes : +8 % par niveau, max 80 %
+  const bc=ri(0,COLS-1),br=ri(1,rows-2);               // position de l’unique bombe (jamais sur la 1re/dernière rangée)
+  bricks=[];
+  for(let r=0;r<rows;r++)for(let c=0;c<COLS;c++){
+    let k='n',hp=1;
+    if(r===br&&c===bc)k='b';
+    else{const q=Math.random();
+      if(q<pr){k='r';hp=ri(2,Math.min(10,3+level*2))}  // résistante : 2 à 10 coups (le maximum monte avec le niveau)
+      else if(q<pr+.12)k='s';}                         // ~12 % de briques surprise
+    bricks.push({x:OX+c*(BW+GAP),y:OY+r*(BH+GAP),r,k,hp,mhp:hp});
+  }
+}
+function toReady(){st='ready';balls=[{x:P.x,y:P.y-P.h/2-R-1,vx:0,vy:0}]}   // balle collée à la raquette
+function reset(){score=0;lives=3;level=1;wideT=mgT=lz=0;P.w=70;gifts=[];bul=[];pt=[];beams=[];build();toReady()}
+function launch(){const a=rnd(-.3,.3);balls[0].vx=spd()*Math.sin(a);balls[0].vy=-spd()*Math.cos(a);st='play'}
+function boom(x,y,c,n){for(let i=0;i<n;i++){const a=rnd(0,6.28),v=rnd(40,200);pt.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,l:rnd(.3,.7),c})}}
+
+/* ================= 3. BRIQUES : DÉGÂTS, DESTRUCTION, BOMBE ================= */
+function hurt(b,d){b.hp-=d;score+=5;if(b.hp<=0)destroy(b)}
+function destroy(b){
+  if(b.dead)return;b.dead=1;score+=10*b.mhp;           // une brique à 10 coups rapporte 100 points
+  boom(b.x+BW/2,b.y+BH/2,b.k==='r'?'#9fb0ff':PAL[b.r%9],8);
+  if(b.k==='s')gifts.push({x:b.x+BW/2,y:b.y,k:BAG[ri(0,BAG.length-1)]});   // surprise : bonus aléatoire
+  if(b.k==='b')explodeAll();                           // bombe : tout le mur saute
+}
+function explodeAll(){fl=.5;vib([60,40,120]);   // vibration de la bombe
+  bricks.forEach(b=>{if(!b.dead){b.dead=1;score+=10;boom(b.x+BW/2,b.y+BH/2,'#ffb02e',4)}})}
+
+/* ================= 4. BONUS, LASER, TIR ================= */
+function take(k){                                      // effet d’un bonus attrapé
+  toast=GD[k][1];toastT=1.4;vib(20);   // petite vibration à chaque bonus
+  if(k==='M'){const add=[];
+    balls.forEach(b=>{if(balls.length+add.length<9)[-.4,.4].forEach(a=>{const c=Math.cos(a),s=Math.sin(a);add.push({x:b.x,y:b.y,vx:b.vx*c-b.vy*s,vy:b.vx*s+b.vy*c})})});
+    balls=balls.concat(add)}
+  else if(k==='L')wideT=20;
+  else if(k==='$')score+=500;
+  else if(k==='V')lives=Math.min(6,lives+1);
+  else if(k==='G')mgT=8;
+  else lz=Math.min(6,lz+2);
+}
+function laser(){                                      // rayon vertical : pulvérise toute la rangée de la 1re brique touchée
+  lz--;let t=null;
+  bricks.forEach(b=>{if(!b.dead&&P.x>=b.x-2&&P.x<=b.x+BW+2&&(!t||b.y>t.y))t=b});
+  beams.push({x:P.x,y0:t?t.y+BH:TOP,y1:P.y-P.h/2,rowY:t?t.y:-99,t:.3});
+  if(t){const row=t.r;bricks.filter(b=>b.r===row).forEach(b=>destroy(b))}
+}
+function fire(){if(paused)return;if(st==='ready')launch();else if(st==='play'&&lz>0)laser()}
+
+/* ================= 5. LOGIQUE (appelée à chaque image) ================= */
+function lose(){                                       // plus aucune balle en jeu
+  lives--;boom(P.x,P.y,'#ffffff',24);vib(120);   // vibration longue : vie perdue
+  if(lives<=0){st='over';overAt=performance.now();if(score>best){best=score;try{localStorage.setItem('casse-briques-best',best)}catch(e){}}return}
+  wideT=mgT=lz=0;gifts=[];bul=[];toReady();            // les bonus sont perdus avec la vie
+}
+function step(b,sp){                                   // un petit pas de la balle : murs, raquette, briques
+  if(b.x<R){b.x=R;b.vx=Math.abs(b.vx)}else if(b.x>W-R){b.x=W-R;b.vx=-Math.abs(b.vx)}
+  if(b.y<TOP+R){b.y=TOP+R;b.vy=Math.abs(b.vy)}
+  const py=P.y-P.h/2;
+  if(b.vy>0&&b.y+R>=py&&b.y-R<=P.y+P.h/2&&Math.abs(b.x-P.x)<=P.w/2+R){   // rebond sur la raquette : l’angle dépend de l’impact
+    const a=clamp((b.x-P.x)/(P.w/2),-1,1)*1.05;b.vx=sp*Math.sin(a);b.vy=-sp*Math.cos(a);b.y=py-R;
+  }
+  for(const k of bricks){                              // collision cercle / rectangle
+    if(k.dead||b.x+R<k.x||b.x-R>k.x+BW||b.y+R<k.y||b.y-R>k.y+BH)continue;
+    const dx=b.x-clamp(b.x,k.x,k.x+BW),dy=b.y-clamp(b.y,k.y,k.y+BH);
+    if(dx*dx+dy*dy>R*R)continue;
+    if(Math.abs(dx)>Math.abs(dy))b.vx=dx>0?Math.abs(b.vx):-Math.abs(b.vx);else b.vy=dy>0?Math.abs(b.vy):-Math.abs(b.vy);
+    hurt(k,1);break;
+  }
+}
+function upd(dt){
+  time+=dt;fl=Math.max(0,fl-dt);toastT-=dt;
+  pt.forEach(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.l-=dt});pt=pt.filter(p=>p.l>0);
+  beams.forEach(b=>b.t-=dt);beams=beams.filter(b=>b.t>0);
+  if(st==='title'||st==='over')return;
+
+  /* raquette : clavier + largeur animée */
+  P.x+=(((K.arrowright||K.d)?1:0)-((K.arrowleft||K.q||K.a)?1:0))*460*dt;
+  P.w+=((wideT>0?130:70)-P.w)*Math.min(1,dt*8);
+  P.x=clamp(P.x,P.w/2,W-P.w/2);
+  if(st==='ready')Object.assign(balls[0],{x:P.x,y:P.y-P.h/2-R-1});
+  if(st==='levelup'){msgT-=dt;if(msgT<=0){level++;build();toReady()}}
+
+  if(st==='play'){
+    if(wideT>0)wideT-=dt;
+    if(mgT>0){mgT-=dt;mgCd-=dt;if(mgCd<=0){mgCd=.13;bul.push({x:P.x-P.w/2+6,y:P.y-8},{x:P.x+P.w/2-6,y:P.y-8})}}   // mitraillette
+    bul.forEach(u=>{u.y-=720*dt;for(const b of bricks)if(!b.dead&&u.x>b.x&&u.x<b.x+BW&&u.y>b.y&&u.y<b.y+BH){hurt(b,1);u.y=-99;break}});
+    bul=bul.filter(u=>u.y>TOP);
+    gifts.forEach(o=>{o.y+=130*dt;if(o.y+9>P.y-P.h/2&&o.y-9<P.y+P.h/2&&Math.abs(o.x-P.x)<P.w/2+14){o.d=1;take(o.k)}});
+    gifts=gifts.filter(o=>!o.d&&o.y<H+20);
+    const sp=spd();                                    // balles : déplacement en petits pas (pas de traversée de briques)
+    balls.forEach(b=>{const n=Math.ceil(sp*dt/4);for(let i=0;i<n;i++){b.x+=b.vx*dt/n;b.y+=b.vy*dt/n;step(b,sp)}});
+    balls=balls.filter(b=>b.y<H+20);
+    if(!balls.length)lose();
+  }
+  bricks=bricks.filter(b=>!b.dead);
+  if(st==='play'&&!bricks.length){st='levelup';msgT=2.2;score+=500;balls=[];gifts=[];bul=[]}   // mur détruit : niveau suivant
+}
+
+/* ================= 6. RENDU ================= */
+function say(s,y,size,col,al){g.font=size+'px "Press Start 2P",ui-monospace,monospace';g.fillStyle=col;g.textAlign=al||'center';g.fillText(s,al==='left'?120:W/2,y)}
+function drawBrick(b){
+  const c=b.k==='r'?'hsl(222,40%,'+(62-b.hp*3)+'%)':b.k==='s'?'#8f5bff':b.k==='b'?'#2a1020':PAL[b.r%9];   // résistante : plus foncée = plus solide
+  g.fillStyle=c;g.fillRect(b.x,b.y,BW,BH);
+  g.fillStyle='rgba(255,255,255,.22)';g.fillRect(b.x,b.y,BW,3);g.fillStyle='rgba(0,0,0,.25)';g.fillRect(b.x,b.y+BH-3,BW,3);
+  const cx=b.x+BW/2,cy=b.y+BH/2;
+  g.font='bold 12px ui-monospace,monospace';g.textAlign='center';g.textBaseline='middle';g.fillStyle='#fff';
+  if(b.k==='r')g.fillText(b.hp,cx,cy+1);
+  else if(b.k==='s')g.fillText('?',cx,cy+1);
+  else if(b.k==='b'){g.fillStyle='#ff4d4d';g.beginPath();g.arc(cx,cy+1,6,0,6.3);g.fill();g.fillStyle='#ffd23f';g.fillRect(cx+2,cy-9,3,4)}
+}
+function btn(y,label,fn){const w=240,h=48,x=(W-w)/2;btns.push({x,y,w,h,fn});g.fillStyle='#1b2250';g.fillRect(x,y,w,h);g.strokeStyle='#ffb02e';g.lineWidth=2;g.strokeRect(x+1,y+1,w-2,h-2);g.textBaseline='alphabetic';say(label,y+30,14,'#e8eeff')}
+const playing=()=>st==='ready'||st==='play'||st==='levelup';
+
+function draw(){
+  g.fillStyle='#0b1020';g.fillRect(0,0,W,H);
+  g.fillStyle='rgba(120,140,255,.07)';for(let x=0;x<W;x+=40)g.fillRect(x,TOP,1,H-TOP);   // grille de fond
+  bricks.forEach(drawBrick);
+  gifts.forEach(o=>{g.fillStyle=GD[o.k][0];g.fillRect(o.x-14,o.y-9,28,18);g.fillStyle='#0b1020';g.font='bold 13px ui-monospace,monospace';g.textAlign='center';g.textBaseline='middle';g.fillText(o.k,o.x,o.y+1)});
+  beams.forEach(b=>{const a=b.t/.3;g.fillStyle='rgba(179,136,255,'+a+')';g.fillRect(b.x-3,b.y0,6,b.y1-b.y0);g.fillStyle='rgba(255,255,255,'+a*.8+')';g.fillRect(0,b.rowY,W,BH)});
+  g.fillStyle='#ff6b57';bul.forEach(u=>g.fillRect(u.x-1.5,u.y-8,3,10));
+  if(st!=='title'){                                    // raquette (extrémités violettes quand le laser est armé)
+    g.fillStyle='#e8eeff';g.fillRect(P.x-P.w/2,P.y-P.h/2,P.w,P.h);
+    g.fillStyle=lz>0?'#b388ff':'#ffb02e';g.fillRect(P.x-P.w/2,P.y-P.h/2,6,P.h);g.fillRect(P.x+P.w/2-6,P.y-P.h/2,6,P.h);
+    if(mgT>0){g.fillStyle='#ff6b57';g.fillRect(P.x-P.w/2+4,P.y-P.h/2-5,4,5);g.fillRect(P.x+P.w/2-8,P.y-P.h/2-5,4,5)}
+  }
+  g.fillStyle='#fff3b0';balls.forEach(b=>{g.beginPath();g.arc(b.x,b.y,R,0,6.3);g.fill()});
+  pt.forEach(p=>{g.globalAlpha=clamp(p.l*2,0,1);g.fillStyle=p.c;g.fillRect(p.x,p.y,3,3)});g.globalAlpha=1;
+  if(fl>0){g.fillStyle='rgba(255,230,160,'+fl+')';g.fillRect(0,0,W,H)}   // éclair de la bombe
+
+  /* interface */
+  if(st!=='title'){
+    g.textBaseline='top';g.font='12px "Press Start 2P",ui-monospace,monospace';g.fillStyle='#dfe6ff';
+    g.textAlign='left';g.fillText('Score '+score,14,14);g.textAlign='right';g.fillText('Niveau '+level,W-14,14);
+    g.font='10px "Press Start 2P",ui-monospace,monospace';g.textAlign='left';g.fillText('Vies '+lives,14,H-24);
+    g.textAlign='right';let y=H-24;
+    if(wideT>0){g.fillText('XL '+Math.ceil(wideT)+'s',W-14,y);y-=16}
+    if(mgT>0){g.fillText('Mitrailleuse '+Math.ceil(mgT)+'s',W-14,y);y-=16}
+    if(lz>0)g.fillText('Laser x'+lz,W-14,y);
+    g.textBaseline='alphabetic';
+    if(toastT>0)say(toast,H-90,12,'#e8eeff');
+  }
+  g.textBaseline='alphabetic';
+  if(st==='ready'){
+    say('Niveau '+level,440,14,'#ffb02e');say('Briques résistantes : '+Math.round(pr*100)+' %',466,10,'#9fb0ff');
+    if(Math.floor(time*2)%2)say('Touchez ou Espace pour lancer',510,10,'#e8eeff');
+  }else if(st==='levelup'){
+    say('Mur détruit !',330,18,'#3ddbd9');say('Niveau '+(level+1)+' : plus de briques résistantes',362,10,'#e8eeff');
+  }
+
+  /* menus dessinés dans le canvas ; btn() enregistre chaque bouton pour la détection du toucher */
+  btns=[];
+  if(st==='title'){
+    say('Casse-briques',140,26,'#ffb02e');say('Meilleur score '+best,180,12,'#9fb0ff');btn(196,'Jouer',play);btn(252,'Mode : '+(mode==='rel'?'Relatif':'Direct'),toggleMode);
+    Object.keys(GD).forEach((k,i)=>{const y=346+i*26;g.fillStyle=GD[k][0];g.fillRect(80,y-14,28,18);g.fillStyle='#0b1020';g.font='bold 13px ui-monospace,monospace';g.textAlign='center';g.textBaseline='middle';g.fillText(k,94,y-4);g.textBaseline='alphabetic';say(GD[k][1],y,11,'#e8eeff','left')});
+    say('Chiffre = coups restants avant destruction',504,9,'#9fb0ff');say('Bombe = tout le mur saute',526,9,'#9fb0ff');
+    say('Glissez : bouger  /  Touchez : lancer ou laser',580,9,'#9fb0ff');say('2e doigt : touchez pour lancer ou tirer',600,9,'#9fb0ff');
+  }else if(st==='over'){
+    say('Partie terminée',230,24,'#ff6b57');say('Score '+score,285,14,'#e8eeff');say('Meilleur score '+best,312,11,'#9fb0ff');
+    btn(360,'Rejouer',play);btn(430,'Menu',menu);
+  }else if(paused){
+    g.fillStyle='rgba(11,16,32,.75)';g.fillRect(0,0,W,H);say('Pause',205,28,'#ffb02e');
+    btn(240,'Reprendre',()=>{paused=false});btn(300,'Recommencer',play);btn(360,'Mode : '+(mode==='rel'?'Relatif':'Direct'),toggleMode);btn(420,'Menu',menu);
+  }else if(playing()){
+    btns.push({x:W/2-36,y:0,w:72,h:42,fn:pause});     // bouton pause (zone tactile agrandie)
+    g.fillStyle='#dfe6ff';g.fillRect(W/2-8,13,5,15);g.fillRect(W/2+3,13,5,15);
+  }
+}
+
+/* ================= 7. ENTRÉES ET MENUS ================= */
+/* RÈGLES : le jeu ne démarre jamais seul (bouton Jouer) et ne se ferme jamais implicitement :
+   application en arrière-plan, écran verrouillé ou bouton Retour d’Android = PAUSE. */
+function toggleMode(){                                 // bascule Relatif <-> Direct et mémorise le choix
+  mode=mode==='rel'?'abs':'rel';
+  try{localStorage.setItem('casse-briques-mode',mode)}catch(e){}
+}
+async function lock(){try{if(navigator.wakeLock)wl=await navigator.wakeLock.request('screen')}catch(e){}}   // garde l’écran allumé
+function pause(){if(playing())paused=true}
+function play(){                                      // Jouer / Rejouer / Recommencer
+  paused=false;
+  if(!document.fullscreenElement&&document.documentElement.requestFullscreen)document.documentElement.requestFullscreen().catch(()=>{});   // plein écran si possible
+  lock();reset();
+}
+function menu(){paused=false;st='title';balls=[];bricks=[];gifts=[];bul=[]}
+const pos=e=>{const r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height,s:W/r.width}};
+/* --- Doigt / stylet / souris ---
+   dragId = identifiant du doigt qui DÉPLACE la raquette (le premier posé).
+   Un second doigt ne déplace rien : s’il touche l’écran, c’est un tir (lancer la balle / laser). */
+let dragId=null,lastX=0,moved=0,t0=0;
+function setX(x){P.x=clamp(x,P.w/2,W-P.w/2)}            // place la raquette en la gardant dans le terrain
+cv.addEventListener('pointerdown',e=>{
+  e.preventDefault();const p=pos(e);
+  if(!(st==='over'&&performance.now()-overAt<800)){      // garde de 0,8 s après la défaite : évite un « Rejouer » accidentel
+    const b=btns.find(b=>p.x>=b.x&&p.x<=b.x+b.w&&p.y>=b.y&&p.y<=b.y+b.h);   // un bouton de menu est-il touché ?
+    if(b){b.fn();return}
+  }
+  if(!playing()||paused)return;
+  if(dragId!==null){fire();return}                       // 2e doigt = lancer / laser
+  dragId=e.pointerId;lastX=e.clientX;moved=0;t0=performance.now();cv.setPointerCapture(e.pointerId);
+  if(mode==='abs'&&e.pointerType!=='mouse')setX(p.x);    // mode Direct : la raquette saute sous le doigt
+});
+cv.addEventListener('pointermove',e=>{
+  if(!playing()||paused)return;
+  if(e.pointerType==='mouse'){setX(pos(e).x);return}     // souris : la raquette suit le curseur
+  if(e.pointerId!==dragId)return;                        // on ignore les autres doigts
+  const dx=e.clientX-lastX;lastX=e.clientX;moved+=Math.abs(dx);          // dx : déplacement du doigt en pixels écran
+  if(mode==='abs')setX(pos(e).x);                        // Direct : x de la raquette = x du doigt
+  else setX(P.x+dx*pos(e).s*DRAG_SENS);                  // Relatif : mêmes mouvements que le doigt (converti en px logiques)
+});
+['pointerup','pointercancel'].forEach(ev=>cv.addEventListener(ev,e=>{
+  if(e.pointerId!==dragId)return;dragId=null;
+  if(e.type==='pointerup'&&moved<10&&performance.now()-t0<300)fire();   // touche brève sans glisser = lancer / laser
+}));
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+document.addEventListener('visibilitychange',()=>{if(document.hidden)pause();else if(playing())lock()});   // le verrou d’écran est libéré en arrière-plan : on le reprend
+addEventListener('blur',()=>{K={};pause()});
+try{history.pushState({g:1},'');addEventListener('popstate',()=>{pause();history.pushState({g:1},'')})}catch(e){}   // Retour Android = pause
+addEventListener('keydown',e=>{const k=e.key.toLowerCase();if([' ','arrowleft','arrowright'].includes(k))e.preventDefault();K[k]=1;
+  if(k===' ')fire();if(k==='p'||k==='escape'){if(paused)paused=false;else pause()}});
+addEventListener('keyup',e=>{K[e.key.toLowerCase()]=0});
+
+/* ================= 8. BOUCLE PRINCIPALE ================= */
+fit();addEventListener('resize',fit);addEventListener('orientationchange',()=>setTimeout(fit,200));   // résolution recalculée si l’écran change
+let last=performance.now();
+function loop(ts){const dt=Math.min(.05,(ts-last)/1000);last=ts;if(!paused)upd(dt);draw();requestAnimationFrame(loop)}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
